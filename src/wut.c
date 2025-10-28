@@ -243,16 +243,28 @@ int wut_cancel(int id) {
     if (current_thread && current_thread->id == id) {
         return -1;
     }
+
     struct wut_tcb* target = tcb_table[id];
     if (!target) {
         return -1;
     }
-    if (target->state != WUT_STATE_READY || !target->queued) {
+    if (target->state == WUT_STATE_UNUSED || target->state == WUT_STATE_ZOMBIE) {
         return -1;
     }
 
-    TAILQ_REMOVE(&ready_threads, target, ready_link);
-    target->queued = 0;
+    if (target->state == WUT_STATE_READY && target->queued) {
+        TAILQ_REMOVE(&ready_threads, target, ready_link);
+        target->queued = 0;
+    }
+
+    if (target->waiting_for != -1) {
+        struct wut_tcb* waited = get_tcb(target->waiting_for);
+        if (waited && waited->joiner == target->id) {
+            waited->joiner = -1;
+        }
+        target->waiting_for = -1;
+    }
+
     target->state = WUT_STATE_ZOMBIE;
     target->exit_status = 128;
     if (target->stack) {
@@ -285,14 +297,9 @@ int wut_join(int id) {
     }
 
     if (target->state == WUT_STATE_ZOMBIE) {
-        target->joiner = current_thread->id;
         int status = target->exit_status;
         cleanup_tcb(target);
         return status;
-    }
-
-    if (target->state != WUT_STATE_READY || !target->queued) {
-        return -1;
     }
 
     target->joiner = current_thread->id;
@@ -302,13 +309,18 @@ int wut_join(int id) {
     if (switch_to_next() == -1) {
         current_thread->state = WUT_STATE_RUNNING;
         current_thread->waiting_for = -1;
-        target->joiner = -1;
+        if (target->joiner == current_thread->id) {
+            target->joiner = -1;
+        }
         return -1;
     }
 
     current_thread->waiting_for = -1;
     target = get_tcb(id);
-    if (!target || target->state != WUT_STATE_ZOMBIE) {
+    if (!target) {
+        return -1;
+    }
+    if (target->state != WUT_STATE_ZOMBIE) {
         return -1;
     }
     int status = target->exit_status;
